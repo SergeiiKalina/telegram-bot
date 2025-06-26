@@ -3,10 +3,16 @@ const { InlineKeyboard, InputFile } = require('grammy');
 const sharp = require('sharp');
 
 class SlideService {
-  constructor(slideModel) {
+  slideState = {};
+  constructor(slideModel, validationService, coachService) {
     this.slideModel = slideModel;
-    this.slideState = {};
+    this.validationService = validationService;
+    this.coachService = null;
     this.linkRegex = /^(https?:\/\/)[^\s$.?#].[^\s]*$/i;
+  }
+
+  setCoachService(coachService) {
+    this.coachService = coachService;
   }
 
   async getSlides() {
@@ -51,7 +57,9 @@ class SlideService {
     await this.slideModel.deleteOne({ _id: id });
   }
 
-  async sendAllSlideToTelegram(ctx, slides) {
+  async sendAllSlideToTelegram(ctx) {
+    const slides = await this.getSlides();
+
     if (!slides || slides.length === 0) {
       await ctx.reply('На жаль, немає слайдів у базі даних.');
       return;
@@ -101,6 +109,85 @@ class SlideService {
     }
   }
 
+  async processSlideActionFirstStep(ctx, userId) {
+    const link = ctx.message.text.trim();
+
+    if (!this.validationService.isValidLink(link)) {
+      await ctx.reply(`Посилання не вірного формату`);
+      return;
+    }
+
+    this.slideState[userId].img = link;
+    this.slideState[userId].step = 2;
+    await ctx.reply(`Тепер короткий опис для картинки(не більше 20 символів):`);
+  }
+
+  async processSlideEditActionSecondStep(ctx, userId) {
+    const alt = ctx.message.text.trim();
+
+    if (!this.validationService.isValidAltText(alt)) {
+      await ctx.reply(
+        `Невиконані умови, опис не може бути більше 20 символів і не пустий`
+      );
+      return;
+    }
+
+    this.slideState[userId].alt = alt;
+
+    const result = await this.editSlide(
+      this.slideState[userId],
+      this.slideState[userId].slideId
+    );
+
+    if (result) {
+      await ctx.reply('Слайд відредаговано!');
+      delete this.slideState[userId];
+      return;
+    } else {
+      await ctx.reply('Слайд не вдалось відредагувати!');
+      delete this.slideState[userId];
+      return;
+    }
+  }
+
+  async processSlideAddActionSecondStep(ctx, userId) {
+    const alt = ctx.message.text.trim();
+    if (!this.validationService.isValidAltText(alt)) {
+      await ctx.reply(
+        `Невиконані умови, опис не може бути більше 20 символів і не пустий`
+      );
+      return;
+    }
+    this.slideState[userId].alt = alt;
+
+    const result = await this.addSlide(
+      this.slideState[userId].img,
+      this.slideState[userId].alt
+    );
+
+    if (result) {
+      await ctx.reply('Слайд додано!');
+      delete this.slideState[userId];
+      return;
+    } else {
+      await ctx.reply('Слайд не вдалось додати!');
+      delete this.slideState[userId];
+      return;
+    }
+  }
+
+  async processSlideStep(ctx, userId) {
+    if (this.slideState[userId].step === 1) {
+      await this.processSlideActionFirstStep(ctx, userId);
+    } else if (this.slideState[userId].step === 2) {
+      if (this.slideState[userId].slideId) {
+        await this.processSlideEditActionSecondStep(ctx, userId);
+      } else {
+        await this.processSlideAddActionSecondStep(ctx, userId);
+      }
+    }
+  }
+
   async handleSlideActions(userId, ctx) {
     if (!this.slideState[userId] && ctx.message.text === 'Додати слайд') {
       await ctx.reply('Привіт! Щоб заповнити додати слайд натисніть кнопку.', {
@@ -110,93 +197,8 @@ class SlideService {
         ),
       });
     }
-
     if (this.slideState[userId]) {
-      if (
-        this.slideState[userId].step === 1 &&
-        this.slideState[userId].slideId
-      ) {
-        const link = ctx.message.text.trim();
-        if (!this.linkRegex.test(link)) {
-          await ctx.reply(`Посилання не вірного формату`);
-          return;
-        }
-        this.slideState[userId].img = link;
-        this.slideState[userId].step = 2;
-        await ctx.reply(
-          `Тепер короткий опис для картинки(не більше 20 символів):`
-        );
-      } else if (
-        this.slideState[userId].step === 2 &&
-        this.slideState[userId].slideId
-      ) {
-        const alt = ctx.message.text.trim();
-        if (alt.length === 0 || alt.length > 20) {
-          await ctx.reply(
-            `Невиконані умови, опис не може бути більше 20 символів і не пустий`
-          );
-          return;
-        }
-        this.slideState[userId].alt = alt;
-
-        const result = await this.editSlide(
-          this.slideState[userId],
-          this.slideState[userId].slideId
-        );
-
-        if (result) {
-          await ctx.reply('Слайд відредаговано!');
-          delete this.slideState[userId];
-          return;
-        } else {
-          await ctx.reply('Слайд не вдалось відредагувати!');
-          delete this.slideState[userId];
-          return;
-        }
-      }
-
-      if (
-        this.slideState[userId].step === 1 &&
-        !this.slideState[userId].slideId
-      ) {
-        const link = ctx.message.text.trim();
-        if (!this.linkRegex.test(link)) {
-          await ctx.reply(`Посилання не вірного формату`);
-          return;
-        }
-        this.slideState[userId].img = link;
-        this.slideState[userId].step = 2;
-        await ctx.reply(
-          `Тепер короткий опис для картинки(не більше 20 символів):`
-        );
-      } else if (
-        this.slideState[userId].step === 2 &&
-        !this.slideState[userId].slideId
-      ) {
-        const alt = ctx.message.text.trim();
-        if (alt.length === 0 || alt.length > 20) {
-          await ctx.reply(
-            `Невиконані умови, опис не може бути більше 20 символів і не пустий`
-          );
-          return;
-        }
-        this.slideState[userId].alt = alt;
-
-        const result = await this.addSlide(
-          this.slideState[userId].img,
-          this.slideState[userId].alt
-        );
-
-        if (result) {
-          await ctx.reply('Слайд додано!');
-          delete this.slideState[userId];
-          return;
-        } else {
-          await ctx.reply('Слайд не вдалось додати!');
-          delete this.slideState[userId];
-          return;
-        }
-      }
+      await this.processSlideStep(ctx, userId);
     }
   }
 
@@ -245,6 +247,10 @@ class SlideService {
     } else if (action === 'cancel_remove_slide') {
       await ctx.reply('Відмінено.');
     }
+  }
+
+  async dropSlideState() {
+    this.slideState = {};
   }
 }
 
