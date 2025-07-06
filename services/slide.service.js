@@ -1,6 +1,7 @@
 const { default: axios } = require('axios');
 const { InlineKeyboard, InputFile } = require('grammy');
 const sharp = require('sharp');
+const { globalCache } = require('./cache.service')
 
 class SlideService {
   slideState = {};
@@ -8,7 +9,6 @@ class SlideService {
     this.slideModel = slideModel;
     this.validationService = validationService;
     this.coachService = null;
-    this.linkRegex = /^(https?:\/\/)[^\s$.?#].[^\s]*$/i;
   }
 
   setCoachService(coachService) {
@@ -16,7 +16,14 @@ class SlideService {
   }
 
   async getSlides() {
-    return this.slideModel.find({});
+    if (!globalCache.has('slides')) {
+      const slides = await this.slideModel.find({});
+      globalCache.set('slides', slides)
+
+      return slides
+    } else {
+      return globalCache.get('slides')
+    }
   }
 
   async editSlide(slide, id) {
@@ -43,6 +50,7 @@ class SlideService {
         alt,
       };
 
+
       const slide = new this.slideModel(newSlide);
       await slide.save();
 
@@ -55,9 +63,12 @@ class SlideService {
 
   async removeSlide(id) {
     await this.slideModel.deleteOne({ _id: id });
+    globalCache.delete('slides')
   }
 
   async sendAllSlideToTelegram(ctx) {
+    await ctx.reply('⏳ Завантажую слайди...')
+
     const slides = await this.getSlides();
 
     if (!slides || slides.length === 0) {
@@ -66,9 +77,9 @@ class SlideService {
     }
     try {
       for (const slide of slides) {
-        if (!slide.img || !slide.img.startsWith('http')) {
+        if (!slide.img || slide.img.startsWith('http')) {
           console.error(
-            `Не правильне посилання на зображення для слайду ${slide.name}`
+            `Не правильне формат зображення для слайду ${slide.name}`
           );
           continue;
         }
@@ -82,11 +93,9 @@ class SlideService {
         `;
 
         try {
-          const response = await axios.get(slide.img, {
-            responseType: 'arraybuffer',
-          });
+          const imageBuffer = Buffer.from(slide.img, 'base64');
 
-          const compressedImage = await sharp(response.data)
+          const compressedImage = await sharp(imageBuffer)
             .resize(1024)
             .toBuffer();
 
@@ -95,6 +104,7 @@ class SlideService {
             parse_mode: 'HTML',
             reply_markup: inlineKeyboard,
           });
+
         } catch (err) {
           console.error(
             `Помилка при відправці фото для слайду ${slide.alt}:`,
@@ -110,16 +120,50 @@ class SlideService {
   }
 
   async processSlideActionFirstStep(ctx, userId) {
-    const link = ctx.message.text.trim();
+    const message = ctx.message;
 
-    if (!this.validationService.isValidLink(link)) {
-      await ctx.reply(`Посилання не вірного формату`);
+    const fileId = message?.photo
+      ? message.photo[message.photo.length - 1].file_id
+      : message?.document?.file_id;
+
+    if (!fileId) {
+      await ctx.reply('Будь ласка, надішліть зображення (фото або документ).');
       return;
     }
 
-    this.slideState[userId].img = link;
-    this.slideState[userId].step = 2;
-    await ctx.reply(`Тепер короткий опис для картинки(не більше 20 символів):`);
+    try {
+      const file = await ctx.api.getFile(fileId);
+
+      const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_API_KEY}/${file.file_path}`;
+
+      const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
+
+      let imageBuffer = Buffer.from(response.data, 'binary');
+      let base64 = imageBuffer.toString('base64');
+
+      if (base64.length > 16_000_000) {
+
+        imageBuffer = await sharp(imageBuffer)
+          .resize({ width: 3042 })
+          .jpeg({ quality: 100 })
+          .toBuffer();
+
+        base64 = imageBuffer.toString('base64');
+
+        if (base64.length > 16_000_000) {
+          await ctx.reply('Фото занадто велике навіть після стиснення. Спробуйте інше або зменшіть розмір.');
+          return;
+        }
+      }
+
+      this.slideState[userId].img = base64
+      this.slideState[userId].step = 2
+
+      await ctx.reply('Фото отримано. Тепер введіть опис (до 20 символів).');
+    } catch (error) {
+      console.error('Помилка при отриманні фото:', error);
+      await ctx.reply('Не вдалося отримати фото. Спробуйте ще раз.');
+    }
   }
 
   async processSlideEditActionSecondStep(ctx, userId) {
@@ -142,16 +186,19 @@ class SlideService {
     if (result) {
       await ctx.reply('Слайд відредаговано!');
       delete this.slideState[userId];
+      globalCache.delete('slides')
       return;
     } else {
       await ctx.reply('Слайд не вдалось відредагувати!');
       delete this.slideState[userId];
+      globalCache.delete('slides')
       return;
     }
   }
 
   async processSlideAddActionSecondStep(ctx, userId) {
     const alt = ctx.message.text.trim();
+
     if (!this.validationService.isValidAltText(alt)) {
       await ctx.reply(
         `Невиконані умови, опис не може бути більше 20 символів і не пустий`
@@ -168,15 +215,18 @@ class SlideService {
     if (result) {
       await ctx.reply('Слайд додано!');
       delete this.slideState[userId];
+      globalCache.delete('slides')
       return;
     } else {
       await ctx.reply('Слайд не вдалось додати!');
       delete this.slideState[userId];
+      globalCache.delete('slides')
       return;
     }
   }
 
   async processSlideStep(ctx, userId) {
+
     if (this.slideState[userId].step === 1) {
       await this.processSlideActionFirstStep(ctx, userId);
     } else if (this.slideState[userId].step === 2) {
@@ -209,7 +259,7 @@ class SlideService {
     if (callbackData === 'fill_slide_form') {
       this.slideState[ctx.from.id] = { step: 1 };
 
-      await ctx.reply('Введіть посилання на слайд:');
+      await ctx.reply('Додайте слайд:');
     } else if (action === 'edit_slide') {
       this.userState = {};
       try {
@@ -229,7 +279,7 @@ class SlideService {
     } else if (action === 'confirm_edit_slide') {
       this.slideState[ctx.from.id] = { step: 1, slideId: identifier };
       await ctx.reply(
-        `Введіть посилання на картинку нового слайду: Старий id:(${identifier}):`
+        `Скиньте картинку нового слайду: Старий id:(${identifier}):`
       );
     } else if (action === 'remove_slide') {
       const inlineKeyboard = new InlineKeyboard()
@@ -243,9 +293,11 @@ class SlideService {
       );
     } else if (action === 'confirm_remove_slide') {
       await this.removeSlide(identifier);
+      globalCache.delete('slides')
       await ctx.reply('Слайд видалено.');
     } else if (action === 'cancel_remove_slide') {
       await ctx.reply('Відмінено.');
+      globalCache.delete('slides')
     }
   }
 

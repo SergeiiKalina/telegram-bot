@@ -4,8 +4,25 @@ const cors = require('cors');
 const coachModel = require('./models/coach.model');
 const slideModel = require('./models/slide.model');
 
+const allowedOrigins = ['https://arena-gym.com.ua', 'http://localhost:3000'];
+
 const app = express();
 const port = process.env.EXPRESS_PORT || 8080;
+
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, false);
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  methods: 'GET, POST, PUT, DELETE, PATCH',
+  credentials: true,
+}));
+
+app.use(express.json());
 
 app.get('/api/coaches', async (req, res) => {
   try {
@@ -28,9 +45,6 @@ app.get('/api/slides', async (req, res) => {
 });
 
 function startApi() {
-  app.use(cors());
-  app.use(express.json());
-
   app.listen(port, () => {
     console.log(`🚀 Express API працює на порту ${port}`);
   });

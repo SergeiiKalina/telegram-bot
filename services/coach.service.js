@@ -1,6 +1,7 @@
 const { default: axios } = require('axios');
 const { InlineKeyboard, InputFile } = require('grammy');
 const sharp = require('sharp');
+const { globalCache } = require('./cache.service')
 
 class CoachService {
   coachState = {};
@@ -35,18 +36,51 @@ class CoachService {
     const experience = ctx.message.text;
     this.coachState[userId].experience = experience.trim();
     this.coachState[userId].step = 4;
-    await ctx.reply(`Тепер додайте посилання на фото тренера:`);
+    await ctx.reply(`Тепер додайте фото тренера:`);
   }
 
   async processAddCoachActionFourthStep(ctx, userId) {
-    const link = ctx.message.text;
+    const message = ctx.message;
 
-    if (!this.validationService.isValidLink(link)) {
-      await ctx.reply('Посилання не коретне, додай коректне посилання!');
+    const fileId = message?.photo
+      ? message.photo[message.photo.length - 1].file_id
+      : message?.document?.file_id;
+
+    if (!fileId) {
+      await ctx.reply('Будь ласка, надішліть зображення (фото або документ).');
       return;
     }
 
-    this.coachState[userId].img = link.trim();
+    try {
+      const file = await ctx.api.getFile(fileId);
+
+      const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_API_KEY}/${file.file_path}`;
+
+      const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
+
+      let imageBuffer = Buffer.from(response.data, 'binary');
+      let base64 = imageBuffer.toString('base64');
+
+      if (base64.length > 16_000_000) {
+
+        imageBuffer = await sharp(imageBuffer)
+          .jpeg({ quality: 100 })
+          .toBuffer();
+
+        base64 = imageBuffer.toString('base64');
+
+        if (base64.length > 16_000_000) {
+          await ctx.reply('Фото занадто велике навіть після стиснення. Спробуйте інше або зменшіть розмір.');
+          return;
+        }
+      }
+
+      this.coachState[userId].img = base64
+
+    } catch (error) {
+      console.error('Помилка при отриманні фото:', error);
+      await ctx.reply('Не вдалося отримати фото. Спробуйте ще раз.');
+    }
 
     let { step, ...restCoachData } = this.coachState[userId];
 
@@ -55,23 +89,58 @@ class CoachService {
     if (result) {
       await ctx.reply('Тренера додано!');
       delete this.coachState[userId];
+      globalCache.delete('coaches')
       return;
     } else {
       await ctx.reply('Щось пішло не так!');
       delete this.coachState[userId];
+      globalCache.delete('coaches')
       return;
     }
   }
 
   async processEditCoachActionFourthStep(ctx, userId) {
-    const link = ctx.message.text;
+    const message = ctx.message;
 
-    if (!this.validationService.isValidLink(link)) {
-      await ctx.reply('Посилання не коретне, додай коректне посилання!');
+    const fileId = message?.photo
+      ? message.photo[message.photo.length - 1].file_id
+      : message?.document?.file_id;
+
+    if (!fileId) {
+      await ctx.reply('Будь ласка, надішліть зображення (фото або документ).');
       return;
     }
 
-    this.coachState[userId].img = link;
+    try {
+      const file = await ctx.api.getFile(fileId);
+
+      const fileUrl = `https://api.telegram.org/file/bot${process.env.BOT_API_KEY}/${file.file_path}`;
+
+      const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
+
+      let imageBuffer = Buffer.from(response.data, 'binary');
+      let base64 = imageBuffer.toString('base64');
+
+      if (base64.length > 16_000_000) {
+
+        imageBuffer = await sharp(imageBuffer)
+          .jpeg({ quality: 100 })
+          .toBuffer();
+
+        base64 = imageBuffer.toString('base64');
+
+        if (base64.length > 16_000_000) {
+          await ctx.reply('Фото занадто велике навіть після стиснення. Спробуйте інше або зменшіть розмір.');
+          return;
+        }
+      }
+
+      this.coachState[userId].img = base64
+
+    } catch (error) {
+      console.error('Помилка при отриманні фото:', error);
+      await ctx.reply('Не вдалося отримати фото. Спробуйте ще раз.');
+    }
 
     let { step, prevCoachName, ...restCoachData } = this.coachState[userId];
 
@@ -80,9 +149,11 @@ class CoachService {
     if (result) {
       await ctx.reply('Тренера відредаговано!');
       delete this.coachState[userId];
+      globalCache.delete('coaches')
       return;
     } else {
       await ctx.reply('Тренера не вдалось відредагувати!');
+      globalCache.delete('coaches')
       return;
     }
   }
@@ -199,6 +270,7 @@ class CoachService {
 
   async handleConfirmRemoveCoach(ctx, id) {
     await this.coachModel.deleteOne({ name: id });
+    globalCache.delete('coaches')
     await ctx.reply('Тренера видалено.');
   }
 
@@ -223,6 +295,8 @@ class CoachService {
   }
 
   async sendAllCoachesToTelegram(ctx) {
+    await ctx.reply('⏳ Завантажую тренерів...')
+
     try {
       const coaches = await this.getCoaches();
 
@@ -232,7 +306,7 @@ class CoachService {
       }
 
       for (const coach of coaches) {
-        if (!coach.img || !coach.img.startsWith('http')) {
+        if (!coach.img || coach.img.startsWith('http')) {
           console.error(
             `Не правильне посилання на зображення для тренера ${coach.name}`
           );
@@ -249,11 +323,9 @@ class CoachService {
                         `;
 
         try {
-          const response = await axios.get(coach.img, {
-            responseType: 'arraybuffer',
-          });
+          const imageBuffer = Buffer.from(coach.img, 'base64');
 
-          const compressedImage = await sharp(response.data)
+          const compressedImage = await sharp(imageBuffer)
             .resize(1024)
             .png()
             .toBuffer();
@@ -282,7 +354,14 @@ class CoachService {
   }
 
   async getCoaches() {
-    return this.coachModel.find({});
+    if (!globalCache.has('coaches')) {
+      const coaches = await this.coachModel.find({});
+      globalCache.set('coaches', coaches)
+      return coaches
+    } else {
+      return globalCache.get('coaches')
+    }
+
   }
 }
 
