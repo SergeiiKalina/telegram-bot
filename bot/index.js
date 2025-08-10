@@ -3,12 +3,15 @@ const { SlideService } = require('../services/slide.service');
 const { Bot, Keyboard } = require('grammy');
 const Slide = require('../models/slide.model');
 const Coach = require('../models/coach.model');
+const TgUser = require('../models/tg-user.model')
 const { CoachService } = require('../services/coach.service');
 const { ValidationService } = require('../services/validation.service');
+const { TgUserService } = require('../services/tg-user.service');
 
 const validationService = new ValidationService();
 const slideService = new SlideService(Slide, validationService);
 const coachService = new CoachService(Coach, validationService, slideService);
+const tgUserService = new TgUserService(TgUser)
 
 slideService.setCoachService(coachService);
 
@@ -31,7 +34,7 @@ function startBot() {
 
   bot.on('message', async (ctx) => {
     const userId = ctx.from.id;
-
+    tgUserService.setUser(ctx)
     await slideService.handleSlideActions(userId, ctx);
 
     await coachService.handleCoachActions(userId, ctx);
